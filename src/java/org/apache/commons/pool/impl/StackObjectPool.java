@@ -156,14 +156,17 @@ public class StackObjectPool extends BaseObjectPool implements ObjectPool {
      * 
      * @return an instance from the pool
      */
-    public synchronized Object borrowObject() throws Exception {
-        assertOpen();
+    public Object borrowObject() throws Exception {
+      synchronized (this) { assertOpen(); }
         Object obj = null;
         boolean newlyCreated = false;
         while (null == obj) {
-            if (!_pool.empty()) {
-                obj = _pool.pop();
-            } else {
+            synchronized (this) {
+                if (!_pool.empty())
+                  obj = _pool.pop();
+            }
+
+            if (null == obj) {
                 if(null == _factory) {
                     throw new NoSuchElementException();
                 } else {
@@ -198,7 +201,7 @@ public class StackObjectPool extends BaseObjectPool implements ObjectPool {
                 }
             }
         }
-        _numActive++;
+        synchronized (this) { _numActive++; }
         return obj;
     }
 
@@ -218,8 +221,13 @@ public class StackObjectPool extends BaseObjectPool implements ObjectPool {
      * 
      * @param obj instance to return to the pool
      */
-    public synchronized void returnObject(Object obj) throws Exception {
-        boolean success = !isClosed();
+    public void returnObject(Object obj) throws Exception {
+        // kind of janky.  we assume there's a factory for now.
+        boolean success = false;
+        synchronized (this) {
+            success = !isClosed();
+        }
+
         if(null != _factory) {
             if(!_factory.validateObject(obj)) {
                 success = false;
@@ -232,25 +240,29 @@ public class StackObjectPool extends BaseObjectPool implements ObjectPool {
             }
         }
 
-        boolean shouldDestroy = !success;
+        synchronized (this) {
+            boolean shouldDestroy = !success;
 
-        _numActive--;
-        if (success) {
-            Object toBeDestroyed = null;
-            if(_pool.size() >= _maxSleeping) {
-                shouldDestroy = true;
-                toBeDestroyed = _pool.remove(0); // remove the stalest object
+            _numActive--;
+            if (success) {
+                Object toBeDestroyed = null;
+                if(_pool.size() >= _maxSleeping) {
+                    shouldDestroy = true;
+                    toBeDestroyed = _pool.remove(0); // remove the stalest object
+                }
+                _pool.push(obj);
+                obj = toBeDestroyed; // swap returned obj with the
+                                     // stalest one so it can be
+                                     // destroyed
             }
-            _pool.push(obj);
-            obj = toBeDestroyed; // swap returned obj with the stalest one so it can be destroyed
-        }
-        notifyAll(); // _numActive has changed
-
-        if(shouldDestroy) { // by constructor, shouldDestroy is false when _factory is null
-            try {
-                _factory.destroyObject(obj);
-            } catch(Exception e) {
-                // ignored
+            notifyAll(); // _numActive has changed
+             
+            if(shouldDestroy) { // by constructor, shouldDestroy is false when _factory is null
+                try {
+                    _factory.destroyObject(obj);
+                } catch(Exception e) {
+                    // ignored
+                }
             }
         }
     }
@@ -258,12 +270,12 @@ public class StackObjectPool extends BaseObjectPool implements ObjectPool {
     /**
      * {@inheritDoc}
      */
-    public synchronized void invalidateObject(Object obj) throws Exception {
-        _numActive--;
+    public void invalidateObject(Object obj) throws Exception {
+        synchronized (this)  { _numActive--; }
         if (null != _factory) {
             _factory.destroyObject(obj);
         }
-        notifyAll(); // _numActive has changed
+        synchronized (this) { notifyAll(); } // _numActive has changed
     }
 
     /**
